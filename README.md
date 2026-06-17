@@ -12,7 +12,8 @@ Point it at one PDF or a whole folder and it pulls out, for each company:
 | **Keywords** | rule-based 1–10 word summary of *what they do* (no AI) |
 | **Employees** | current headcount |
 | **Last fundraising round** | amount, date and type (e.g. `$1.00M`, `Seed Round`, `31-Dec-2023`) |
-| **Last round type** | e.g. `Seed Round`, `Later Stage VC`, `Series B` |
+| **Last round stage** | normalized to `Pre-Seed` / `Seed` / `Series A…` / `Early Stage VC` / `Later Stage VC`; picks the most recent *substantive* round (skips accelerator/angel/grant unless that's all there is) |
+| **Last round type** | the raw PitchBook deal type of the most recent deal |
 | **Total raised to date** | cumulative capital raised |
 | **Current team** | size **and** names, titles, and emails |
 | **Primary offices** | HQ first, then alternate offices |

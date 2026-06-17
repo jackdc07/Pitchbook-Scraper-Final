@@ -12,6 +12,7 @@ _COLUMNS: list[tuple[str, callable]] = [
     ("Website", lambda c: c.website or ""),
     ("Keywords", lambda c: c.keywords or ""),
     ("Employees", lambda c: c.employees or ""),
+    ("Last Round Stage", lambda c: c.last_round_stage or ""),
     ("Last Round Type", lambda c: c.last_round_type or ""),
     ("Last Round Amount", lambda c: c.last_round_amount or ""),
     ("Last Round Date", lambda c: c.last_round_date or ""),

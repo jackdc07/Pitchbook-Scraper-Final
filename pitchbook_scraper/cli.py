@@ -37,7 +37,7 @@ def _iter_pdfs(paths: list[str]):
 # CSV columns: flat, one row per company.
 _CSV_FIELDS = [
     "name", "website", "source_file", "keywords", "employees",
-    "last_round_type", "last_round_amount", "last_round_date",
+    "last_round_stage", "last_round_type", "last_round_amount", "last_round_date",
     "total_raised", "most_recent_revenue", "revenue_date",
     "acquired", "acquirer", "acquisition_date",
     "team_size", "team_names", "team_emails", "team",
@@ -55,6 +55,7 @@ def _company_csv_row(c: Company) -> dict:
         "source_file": c.source_file or "",
         "keywords": c.keywords or "",
         "employees": c.employees or "",
+        "last_round_stage": c.last_round_stage or "",
         "last_round_type": c.last_round_type or "",
         "last_round_amount": c.last_round_amount or "",
         "last_round_date": c.last_round_date or "",
@@ -88,7 +89,7 @@ def _render_text(c: Company) -> str:
         f"Last round:     {c.last_round_amount or 'N/A'} "
         f"{('(' + c.last_round_type + ')') if c.last_round_type else ''} "
         f"{('on ' + c.last_round_date) if c.last_round_date else ''}".rstrip(),
-        f"Last round type:{c.last_round_type or 'N/A'}",
+        f"Round stage:    {c.last_round_stage or 'N/A'}   (raw: {c.last_round_type or 'N/A'})",
         f"Total raised:   {c.total_raised or 'N/A'}",
         f"Most recent rev:{rev}",
         f"Acquired:       {'Unknown' if c.acquired is None else ('Yes' if c.acquired else 'No')}"
