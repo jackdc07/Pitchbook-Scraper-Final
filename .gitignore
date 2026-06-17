@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+*.csv
+.DS_Store
+
+# Proprietary PitchBook exports — do not commit (licensed to the subscriber).
+samples/*.pdf
