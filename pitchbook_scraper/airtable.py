@@ -28,6 +28,7 @@ def _fields(c: Company) -> dict:
         "Website": c.website or "",
         "Keywords": c.keywords or "",
         "Employees": c.employees or "",
+        "Employees Updated Date": c.employees_updated_date or "",
         "Last Round Stage": c.last_round_stage or "",
         "Last Round Type": c.last_round_type or "",
         "Last Round Amount": c.last_round_amount or "",
