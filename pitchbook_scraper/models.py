@@ -38,6 +38,7 @@ class Company:
     description: Optional[str] = None
     keywords: Optional[str] = None                  # rule-based 1-10 word "what they do"
     employees: Optional[str] = None                 # headcount
+    employees_updated_date: Optional[str] = None    # "as of" date for the headcount
     last_round_type: Optional[str] = None
     last_round_stage: Optional[str] = None          # normalized: Seed, Series A, Later Stage VC, ...
     last_round_amount: Optional[str] = None
