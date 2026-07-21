@@ -485,18 +485,39 @@ def _next_section_top(words, after_top, left_x, page_height):
     return min(candidates) if candidates else page_height
 
 
-def _extract_team_from_page(page) -> list[TeamMember]:
+def _is_team_continuation_page(page) -> bool:
+    """True if the roster table wraps onto this page without repeating the
+    "Current Team" label -- it opens directly with the table's own header row.
+
+    Distinguished from the differently-shaped "Current Board Members" header
+    (Name/Title/Representing/Role Since/Phone/Email) by requiring an "Office"
+    column, which only the team roster header has, right at the page top.
+    """
+    words = page.extract_words(use_text_flow=False)
+    if not words:
+        return False
+    page_top = min(w["top"] for w in words)
+    header = {w["text"] for w in words if w["top"] - page_top < 20}
+    return {"Name", "Title", "Office"} <= header
+
+
+def _extract_team_from_page(page, *, continuation: bool = False) -> list[TeamMember]:
     text = page.extract_text() or ""
-    if "Current Team" not in text:
+    if not continuation and "Current Team" not in text:
         return []
 
     words = page.extract_words(use_text_flow=False)
 
     # A page can hold other tables with their own "Name"/"Title" headers (e.g.
     # "Similar Companies"). Anchor on the team table's header by taking the
-    # first one that appears *below* the "Current Team" label.
-    ct = _label_position(words, "Current Team")
-    ct_top = ct[1] if ct else 0
+    # first one that appears *below* the "Current Team" label. On a
+    # continuation page there is no label to anchor on -- the table's own
+    # header is the first thing on the page, so start from the top.
+    if continuation:
+        ct_top = 0.0
+    else:
+        ct = _label_position(words, "Current Team")
+        ct_top = ct[1] if ct else 0
     name_hdr = next(
         (w for w in sorted(words, key=lambda w: w["top"])
          if w["text"] == "Name" and w["top"] > ct_top), None
@@ -616,11 +637,28 @@ def _title_column_left(bands: list[list], title_hdr_x0: float) -> float:
 def _extract_team(pdf) -> list[TeamMember]:
     members: list[TeamMember] = []
     seen: set[str] = set()
+    awaiting_continuation = False
     for page in pdf.pages:
-        for member in _extract_team_from_page(page):
+        text = page.extract_text() or ""
+        has_label = "Current Team" in text
+        # Keep watching subsequent pages for a wrapped table only while the
+        # chain is unbroken: the label page itself, or a continuation page
+        # that matches the roster's own header shape.
+        is_continuation = not has_label and awaiting_continuation and _is_team_continuation_page(page)
+
+        if has_label:
+            page_members = _extract_team_from_page(page)
+        elif is_continuation:
+            page_members = _extract_team_from_page(page, continuation=True)
+        else:
+            page_members = []
+
+        for member in page_members:
             if member.name not in seen:
                 seen.add(member.name)
                 members.append(member)
+
+        awaiting_continuation = has_label or is_continuation
     return members
 
 
