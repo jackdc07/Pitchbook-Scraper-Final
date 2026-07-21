@@ -825,13 +825,17 @@ def parse_company(pdf_path: str | Path) -> Company:
 
     company.source_file = pdf_path.name
 
-    # Reconcile the parsed roster against the reported "Current Team (N)" count.
+    # Team Size is authoritative from the reported "Current Team (N)" header,
+    # not just the count of rows the roster parser managed to extract (which
+    # can undercount on odd wraps/formatting). Keep the parsed roster for
+    # names/titles/emails, but surface a note if the two disagree.
     reported = _team_size_reported(_normalize(full_text))
-    if reported is not None and reported != company.team_size:
-        # Keep what we parsed but surface the discrepancy for the caller.
-        company.financials.setdefault(
-            "_team_count_note",
-            f"Profile reports {reported} team members; parsed {company.team_size}.",
-        )
+    if reported is not None:
+        company.team_size_reported = reported
+        if reported != len(company.team):
+            company.financials.setdefault(
+                "_team_count_note",
+                f"Profile reports {reported} team members; parsed {len(company.team)}.",
+            )
 
     return company
