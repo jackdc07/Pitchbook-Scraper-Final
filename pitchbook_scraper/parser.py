@@ -39,6 +39,19 @@ def _clean(value: str | None) -> str | None:
     return value or None
 
 
+def _join_wrapped(parts: list[str]) -> str:
+    """Join word fragments, gluing a trailing '-' (mid-word line wrap, e.g. a
+    hyphenated surname split across lines) directly onto the next fragment
+    instead of inserting the usual space."""
+    out = ""
+    for part in parts:
+        if out.endswith("-") or not out:
+            out += part
+        else:
+            out += " " + part
+    return out
+
+
 def _search(pattern: str, text: str, flags: int = 0, group: int = 1) -> str | None:
     m = re.search(pattern, text, flags)
     return _clean(m.group(group)) if m else None
@@ -64,6 +77,15 @@ def _parse_name(text: str) -> str | None:
 def _parse_employees(text: str) -> str | None:
     # Highlights box: "Employees\n15" ; General Info: "Employees   15"
     return _search(r"\bEmployees\s+([\d,]+)\b", text)
+
+
+def _parse_employees_updated_date(text: str) -> str | None:
+    # Only the Highlights box's "Employees" pairs with an "As of <date>" a
+    # short distance below it (the General Information / financials-table
+    # mentions of "Employees" elsewhere in the profile don't). Bound the
+    # lookahead tightly so it can't reach past it to an unrelated "As of"
+    # date (e.g. Post Valuation's, a bit further down the same box).
+    return _search(r"\bEmployees\b.{0,120}?\bAs of\s+(" + _DATE + r")", text, re.S)
 
 
 def _parse_website(text: str) -> str | None:
@@ -485,18 +507,54 @@ def _next_section_top(words, after_top, left_x, page_height):
     return min(candidates) if candidates else page_height
 
 
-def _extract_team_from_page(page) -> list[TeamMember]:
+def _cluster_tops(tops, tol: float = 5.0) -> list[float]:
+    """Merge nearly-identical tops into single row markers.
+
+    Words on the same visual line don't always report exactly the same
+    ``top`` (font-metric jitter of a point or two), which would otherwise
+    make two fragments of one line look like separate rows.
+    """
+    clusters: list[float] = []
+    for t in sorted(tops):
+        if clusters and t - clusters[-1] < tol:
+            continue
+        clusters.append(t)
+    return clusters
+
+
+def _is_team_continuation_page(page) -> bool:
+    """True if the roster table wraps onto this page without repeating the
+    "Current Team" label -- it opens directly with the table's own header row.
+
+    Distinguished from the differently-shaped "Current Board Members" header
+    (Name/Title/Representing/Role Since/Phone/Email) by requiring an "Office"
+    column, which only the team roster header has, right at the page top.
+    """
+    words = page.extract_words(use_text_flow=False)
+    if not words:
+        return False
+    page_top = min(w["top"] for w in words)
+    header = {w["text"] for w in words if w["top"] - page_top < 20}
+    return {"Name", "Title", "Office"} <= header
+
+
+def _extract_team_from_page(page, *, continuation: bool = False) -> list[TeamMember]:
     text = page.extract_text() or ""
-    if "Current Team" not in text:
+    if not continuation and "Current Team" not in text:
         return []
 
     words = page.extract_words(use_text_flow=False)
 
     # A page can hold other tables with their own "Name"/"Title" headers (e.g.
     # "Similar Companies"). Anchor on the team table's header by taking the
-    # first one that appears *below* the "Current Team" label.
-    ct = _label_position(words, "Current Team")
-    ct_top = ct[1] if ct else 0
+    # first one that appears *below* the "Current Team" label. On a
+    # continuation page there is no label to anchor on -- the table's own
+    # header is the first thing on the page, so start from the top.
+    if continuation:
+        ct_top = 0.0
+    else:
+        ct = _label_position(words, "Current Team")
+        ct_top = ct[1] if ct else 0
     name_hdr = next(
         (w for w in sorted(words, key=lambda w: w["top"])
          if w["text"] == "Name" and w["top"] > ct_top), None
@@ -518,18 +576,62 @@ def _extract_team_from_page(page) -> list[TeamMember]:
     ]
     right_start = min(right_cols) if right_cols else (title_hdr["x0"] + 120)
 
+    office_hdr = next(
+        (w for w in words if w["text"] == "Office" and abs(w["top"] - header_top) < 6), None
+    )
+    phone_hdr = next(
+        (w for w in words if w["text"] == "Phone" and abs(w["top"] - header_top) < 6), None
+    )
+    email_hdr = next(
+        (w for w in words if w["text"] == "Email" and abs(w["top"] - header_top) < 6), None
+    )
+
     end_top = _next_section_top(words, header_top, name_x0, page.height)
 
-    # Each member's first row carries a phone and/or an email in the right-hand
-    # columns. Anchor on either, because some members have a phone but no email
-    # (so anchoring on email alone would merge them). One anchor per row top.
-    anchor_tops = sorted({
+    # Each member's first row usually carries a phone and/or an email in the
+    # right-hand columns. Anchor on either, because some members have a phone
+    # but no email (so anchoring on email alone would merge them).
+    anchor_tops = {
         round(w["top"])
         for w in words
         if header_top < w["top"] < end_top
         and w["x0"] >= right_start - 6
         and ("@" in w["text"] or _PHONE_TOKEN.fullmatch(w["text"]))
-    })
+    }
+
+    # A member with neither a phone nor an email listed has no anchor above
+    # and is silently dropped. Fall back to the Office column, which is
+    # populated for virtually every member. Office itself can wrap across a
+    # couple of lines, so a single member's own Office rows sit close
+    # together (~12pt apart in practice); the jump to the next member's
+    # Office is much bigger (~30pt+). Treat only the first row of each such
+    # cluster -- the one following a gap -- as a new anchor.
+    if office_hdr is not None:
+        office_left = office_hdr["x0"] - 20
+        office_right = (phone_hdr["x0"] if phone_hdr else right_start + 120) - 4
+        office_row_tops = _cluster_tops([
+            w["top"] for w in words
+            if header_top < w["top"] < end_top
+            and office_left <= w["x0"] < office_right
+        ])
+        prev_top = None
+        for t in office_row_tops:
+            if prev_top is None or t - prev_top > 20:
+                anchor_tops.add(round(t))
+            prev_top = t
+
+    # The phone/email and Office signals can both anchor the same member on
+    # different lines of their own wrapped entry (e.g. an office-gap anchor
+    # on their first line, and an email whose "@" only appears on their
+    # second line because the address itself wraps). Merge anchors that are
+    # closer together than a real between-member gap into one, keeping the
+    # earlier (true first) row.
+    merged_anchors: list[int] = []
+    for t in sorted(anchor_tops):
+        if merged_anchors and t - merged_anchors[-1] < 18:
+            continue
+        merged_anchors.append(t)
+    anchor_tops = merged_anchors
     if not anchor_tops:
         return []
     bounds = anchor_tops + [end_top]
@@ -579,14 +681,39 @@ def _extract_team_from_page(page) -> list[TeamMember]:
                     title_parts.append(w["text"])
 
         # Email (if any) sits in the Email column within this member's rows.
+        # It can itself wrap across two lines (e.g. a long local-part or
+        # domain breaking mid-word), so join every word in the Email column
+        # rather than taking the first "@" token. Trimmed the same way as
+        # name/title (stop at a large vertical gap) so a trailing footer
+        # line on the last member of a page never gets pulled in.
         email = None
-        for w in words:
-            if anchor_tops[i] - 4 <= w["top"] < bounds[i + 1] - 4 and "@" in w["text"]:
-                email = w["text"].strip().rstrip(".,;")
-                break
+        if email_hdr is not None:
+            band_top, band_bot = anchor_tops[i] - 4, bounds[i + 1] - 4
+            email_candidates = sorted(
+                (
+                    w for w in words
+                    if band_top <= w["top"] < band_bot
+                    and w["x0"] >= email_hdr["x0"] - 8
+                ),
+                key=lambda w: (w["top"], w["x0"]),
+            )
+            kept_email: list = []
+            last_top = None
+            for w in email_candidates:
+                if last_top is not None and w["top"] - last_top > 28:
+                    break
+                kept_email.append(w)
+                last_top = w["top"]
+            if kept_email:
+                email = "".join(w["text"] for w in kept_email).strip().rstrip(".,;") or None
+        else:
+            for w in words:
+                if anchor_tops[i] - 4 <= w["top"] < bounds[i + 1] - 4 and "@" in w["text"]:
+                    email = w["text"].strip().rstrip(".,;")
+                    break
 
-        name = _clean(" ".join(name_parts))
-        title = _clean(" ".join(title_parts))
+        name = _clean(_join_wrapped(name_parts))
+        title = _clean(_join_wrapped(title_parts))
         if name:
             members.append(TeamMember(name=name, title=title, email=email))
 
@@ -616,11 +743,28 @@ def _title_column_left(bands: list[list], title_hdr_x0: float) -> float:
 def _extract_team(pdf) -> list[TeamMember]:
     members: list[TeamMember] = []
     seen: set[str] = set()
+    awaiting_continuation = False
     for page in pdf.pages:
-        for member in _extract_team_from_page(page):
+        text = page.extract_text() or ""
+        has_label = "Current Team" in text
+        # Keep watching subsequent pages for a wrapped table only while the
+        # chain is unbroken: the label page itself, or a continuation page
+        # that matches the roster's own header shape.
+        is_continuation = not has_label and awaiting_continuation and _is_team_continuation_page(page)
+
+        if has_label:
+            page_members = _extract_team_from_page(page)
+        elif is_continuation:
+            page_members = _extract_team_from_page(page, continuation=True)
+        else:
+            page_members = []
+
+        for member in page_members:
             if member.name not in seen:
                 seen.add(member.name)
                 members.append(member)
+
+        awaiting_continuation = has_label or is_continuation
     return members
 
 
@@ -756,6 +900,8 @@ def parse_text(text: str) -> Company:
     company.description = _parse_description(norm)
     company.keywords = _parse_keywords(company.description)
     company.employees = _parse_employees(norm)
+    if company.employees:
+        company.employees_updated_date = _parse_employees_updated_date(norm)
 
     rt, amt, date = _parse_last_deal(norm)
     company.last_round_type = rt
@@ -825,13 +971,17 @@ def parse_company(pdf_path: str | Path) -> Company:
 
     company.source_file = pdf_path.name
 
-    # Reconcile the parsed roster against the reported "Current Team (N)" count.
+    # Team Size is authoritative from the reported "Current Team (N)" header,
+    # not just the count of rows the roster parser managed to extract (which
+    # can undercount on odd wraps/formatting). Keep the parsed roster for
+    # names/titles/emails, but surface a note if the two disagree.
     reported = _team_size_reported(_normalize(full_text))
-    if reported is not None and reported != company.team_size:
-        # Keep what we parsed but surface the discrepancy for the caller.
-        company.financials.setdefault(
-            "_team_count_note",
-            f"Profile reports {reported} team members; parsed {company.team_size}.",
-        )
+    if reported is not None:
+        company.team_size_reported = reported
+        if reported != len(company.team):
+            company.financials.setdefault(
+                "_team_count_note",
+                f"Profile reports {reported} team members; parsed {len(company.team)}.",
+            )
 
     return company

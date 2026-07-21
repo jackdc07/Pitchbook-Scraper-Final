@@ -54,10 +54,11 @@ class Company:
 
     # Current team
     team: list[TeamMember] = field(default_factory=list)
+    team_size_reported: Optional[int] = None  # authoritative "Current Team (N)" header count
 
     @property
     def team_size(self) -> int:
-        return len(self.team)
+        return self.team_size_reported if self.team_size_reported is not None else len(self.team)
 
     @property
     def team_names(self) -> list[str]:
