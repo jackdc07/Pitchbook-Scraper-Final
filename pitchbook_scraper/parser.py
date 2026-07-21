@@ -39,6 +39,19 @@ def _clean(value: str | None) -> str | None:
     return value or None
 
 
+def _join_wrapped(parts: list[str]) -> str:
+    """Join word fragments, gluing a trailing '-' (mid-word line wrap, e.g. a
+    hyphenated surname split across lines) directly onto the next fragment
+    instead of inserting the usual space."""
+    out = ""
+    for part in parts:
+        if out.endswith("-") or not out:
+            out += part
+        else:
+            out += " " + part
+    return out
+
+
 def _search(pattern: str, text: str, flags: int = 0, group: int = 1) -> str | None:
     m = re.search(pattern, text, flags)
     return _clean(m.group(group)) if m else None
@@ -485,6 +498,21 @@ def _next_section_top(words, after_top, left_x, page_height):
     return min(candidates) if candidates else page_height
 
 
+def _cluster_tops(tops, tol: float = 5.0) -> list[float]:
+    """Merge nearly-identical tops into single row markers.
+
+    Words on the same visual line don't always report exactly the same
+    ``top`` (font-metric jitter of a point or two), which would otherwise
+    make two fragments of one line look like separate rows.
+    """
+    clusters: list[float] = []
+    for t in sorted(tops):
+        if clusters and t - clusters[-1] < tol:
+            continue
+        clusters.append(t)
+    return clusters
+
+
 def _is_team_continuation_page(page) -> bool:
     """True if the roster table wraps onto this page without repeating the
     "Current Team" label -- it opens directly with the table's own header row.
@@ -539,18 +567,62 @@ def _extract_team_from_page(page, *, continuation: bool = False) -> list[TeamMem
     ]
     right_start = min(right_cols) if right_cols else (title_hdr["x0"] + 120)
 
+    office_hdr = next(
+        (w for w in words if w["text"] == "Office" and abs(w["top"] - header_top) < 6), None
+    )
+    phone_hdr = next(
+        (w for w in words if w["text"] == "Phone" and abs(w["top"] - header_top) < 6), None
+    )
+    email_hdr = next(
+        (w for w in words if w["text"] == "Email" and abs(w["top"] - header_top) < 6), None
+    )
+
     end_top = _next_section_top(words, header_top, name_x0, page.height)
 
-    # Each member's first row carries a phone and/or an email in the right-hand
-    # columns. Anchor on either, because some members have a phone but no email
-    # (so anchoring on email alone would merge them). One anchor per row top.
-    anchor_tops = sorted({
+    # Each member's first row usually carries a phone and/or an email in the
+    # right-hand columns. Anchor on either, because some members have a phone
+    # but no email (so anchoring on email alone would merge them).
+    anchor_tops = {
         round(w["top"])
         for w in words
         if header_top < w["top"] < end_top
         and w["x0"] >= right_start - 6
         and ("@" in w["text"] or _PHONE_TOKEN.fullmatch(w["text"]))
-    })
+    }
+
+    # A member with neither a phone nor an email listed has no anchor above
+    # and is silently dropped. Fall back to the Office column, which is
+    # populated for virtually every member. Office itself can wrap across a
+    # couple of lines, so a single member's own Office rows sit close
+    # together (~12pt apart in practice); the jump to the next member's
+    # Office is much bigger (~30pt+). Treat only the first row of each such
+    # cluster -- the one following a gap -- as a new anchor.
+    if office_hdr is not None:
+        office_left = office_hdr["x0"] - 20
+        office_right = (phone_hdr["x0"] if phone_hdr else right_start + 120) - 4
+        office_row_tops = _cluster_tops([
+            w["top"] for w in words
+            if header_top < w["top"] < end_top
+            and office_left <= w["x0"] < office_right
+        ])
+        prev_top = None
+        for t in office_row_tops:
+            if prev_top is None or t - prev_top > 20:
+                anchor_tops.add(round(t))
+            prev_top = t
+
+    # The phone/email and Office signals can both anchor the same member on
+    # different lines of their own wrapped entry (e.g. an office-gap anchor
+    # on their first line, and an email whose "@" only appears on their
+    # second line because the address itself wraps). Merge anchors that are
+    # closer together than a real between-member gap into one, keeping the
+    # earlier (true first) row.
+    merged_anchors: list[int] = []
+    for t in sorted(anchor_tops):
+        if merged_anchors and t - merged_anchors[-1] < 18:
+            continue
+        merged_anchors.append(t)
+    anchor_tops = merged_anchors
     if not anchor_tops:
         return []
     bounds = anchor_tops + [end_top]
@@ -600,14 +672,39 @@ def _extract_team_from_page(page, *, continuation: bool = False) -> list[TeamMem
                     title_parts.append(w["text"])
 
         # Email (if any) sits in the Email column within this member's rows.
+        # It can itself wrap across two lines (e.g. a long local-part or
+        # domain breaking mid-word), so join every word in the Email column
+        # rather than taking the first "@" token. Trimmed the same way as
+        # name/title (stop at a large vertical gap) so a trailing footer
+        # line on the last member of a page never gets pulled in.
         email = None
-        for w in words:
-            if anchor_tops[i] - 4 <= w["top"] < bounds[i + 1] - 4 and "@" in w["text"]:
-                email = w["text"].strip().rstrip(".,;")
-                break
+        if email_hdr is not None:
+            band_top, band_bot = anchor_tops[i] - 4, bounds[i + 1] - 4
+            email_candidates = sorted(
+                (
+                    w for w in words
+                    if band_top <= w["top"] < band_bot
+                    and w["x0"] >= email_hdr["x0"] - 8
+                ),
+                key=lambda w: (w["top"], w["x0"]),
+            )
+            kept_email: list = []
+            last_top = None
+            for w in email_candidates:
+                if last_top is not None and w["top"] - last_top > 28:
+                    break
+                kept_email.append(w)
+                last_top = w["top"]
+            if kept_email:
+                email = "".join(w["text"] for w in kept_email).strip().rstrip(".,;") or None
+        else:
+            for w in words:
+                if anchor_tops[i] - 4 <= w["top"] < bounds[i + 1] - 4 and "@" in w["text"]:
+                    email = w["text"].strip().rstrip(".,;")
+                    break
 
-        name = _clean(" ".join(name_parts))
-        title = _clean(" ".join(title_parts))
+        name = _clean(_join_wrapped(name_parts))
+        title = _clean(_join_wrapped(title_parts))
         if name:
             members.append(TeamMember(name=name, title=title, email=email))
 
