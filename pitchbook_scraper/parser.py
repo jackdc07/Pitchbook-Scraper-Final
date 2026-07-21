@@ -79,6 +79,15 @@ def _parse_employees(text: str) -> str | None:
     return _search(r"\bEmployees\s+([\d,]+)\b", text)
 
 
+def _parse_employees_updated_date(text: str) -> str | None:
+    # Only the Highlights box's "Employees" pairs with an "As of <date>" a
+    # short distance below it (the General Information / financials-table
+    # mentions of "Employees" elsewhere in the profile don't). Bound the
+    # lookahead tightly so it can't reach past it to an unrelated "As of"
+    # date (e.g. Post Valuation's, a bit further down the same box).
+    return _search(r"\bEmployees\b.{0,120}?\bAs of\s+(" + _DATE + r")", text, re.S)
+
+
 def _parse_website(text: str) -> str | None:
     return _search(r"\bWebsite\s+(\S+)", text)
 
@@ -891,6 +900,8 @@ def parse_text(text: str) -> Company:
     company.description = _parse_description(norm)
     company.keywords = _parse_keywords(company.description)
     company.employees = _parse_employees(norm)
+    if company.employees:
+        company.employees_updated_date = _parse_employees_updated_date(norm)
 
     rt, amt, date = _parse_last_deal(norm)
     company.last_round_type = rt
